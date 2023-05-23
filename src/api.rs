@@ -73,14 +73,16 @@ pub const FRIENDS_QUERY: GqlOp = GqlOp!(r#"query {
 
 ////////////////
 
-#[derive(Debug, serde::Deserialize)]
-struct TokenResponse {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TokenResponse {
 	access_token: String,
 	expires_at: String,
 	token_type: String,
 	account_id: String,
+	refresh_token: String,
+	refresh_expires_at: String,
 
-	#[serde(rename(deserialize = "displayName"))]
+	#[serde(rename = "displayName")]
 	display_name: String,
 }
 
@@ -107,7 +109,7 @@ pub struct Api {
 	eg1_cache: String,
 }
 impl Api {
-	pub fn new(auth: String) -> Result<Self, ApiError<TokenError>> {
+	pub fn new(auth: &str) -> Result<Self, ApiError<TokenError>> {
 		let cl = ClientBuilder::new()
 			.use_native_tls()
 			.http2_prior_knowledge()
@@ -129,11 +131,15 @@ impl Api {
 		});
 	}
 
+	pub fn token_response(&self) -> &TokenResponse {
+		return &(self.tkn_resp);
+	}
+
 	fn eg1(&self) -> &str {
 		return self.eg1_cache.as_str();
 	}
 
-	pub fn gql(&mut self, op: GqlOp) -> Result<serde_json::Value, ApiError<()>> {
+	pub fn gql<T: serde::de::DeserializeOwned>(&mut self, op: GqlOp) -> Result<T, ApiError<()>> {
 		// to everyone reading this:
 		// did you know if your website has a user-agent whitelist, then you might [redacted]? [redacted] :-)
 		const UA: &'static str = "\

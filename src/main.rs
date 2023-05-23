@@ -2,38 +2,83 @@
 
 mod api;
 mod base64;
+mod clean_file;
+use clean_file::*;
 
-use std::{env::args, process::Command};
-use api::{ApiError::*};
+use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic};
+use api::ApiError::*;
+use libc::{signal, SIGINT, SIGTERM};
 
-fn login() -> &'static str {
-	eprintln!("log in, then re-run with argv[1] as your authorization code.");
+fn login(mut args: Args) -> Result<(), &'static str> {
+	let path =
+		args.next().ok_or("account path required")?;
+	let mut file = CleanFile::open(path, true)?;
+
 	if Command::new("xdg-open").arg(api::LOGIN).spawn().is_err() {
-		return "failed to launch browser";
+		println!("{}", api::LOGIN);
 	}
-	return "not authenticated";
-}
-fn main() -> Result<(), &'static str> {
-	let Some(auth) = args().nth(1) else {
-		return Err(login());
-	};
+	let mut lines = stdin().lines();
+	let auth = loop {
+		print!("authorization code: ");
+		drop(stdout().flush()); // doesn't matter if this fails
+		let Some(Ok(ln)) = lines.next() else {
+			return Err("failed to read from stdin");
+		};
 
-	let mut api = api::Api::new(auth).map_err(|err| match err {
+		let t = ln.trim();
+		if t.len() == 32 && t.chars().all(|c| !c.is_ascii_uppercase() && c.is_ascii_hexdigit()) {
+			break ln;
+		}
+	};
+	println!("proceeding!");
+
+	let api = api::Api::new(auth.trim()).map_err(|err| match err {
 		Eg(eg) if eg.code == "errors.com.epicgames.common.oauth.invalid_client" => {
-			"invalid client - open an issue"
+			return "invalid client - open an issue";
 		}
 		Eg(eg) if eg.code == "errors.com.epicgames.account.oauth.authorization_code_not_found" => {
-			eprintln!("bad authorization code");
-			return login();
+			return "bad authorization code";
 		}
 		other => {
 			eprintln!("{other:?}");
-			"unknown error"
+			return "unknown error"
 		}
 	})?;
 
-	let resp = api.gql(api::FRIENDS_QUERY);
-	println!("{resp:?}");
-	
+	let res = file.write(serde_json::ser::to_string(
+		api.token_response()
+	).unwrap().as_bytes());
+	res.expect("failed to write file");
+
 	return Ok(());
+}
+
+fn run(mut args: Args) -> Result<(), &'static str> {
+	let path =
+		args.next().ok_or("account path required")?;
+	let mut file = CleanFile::open(path, false)?;
+
+	return Ok(());
+}
+
+fn main() -> Result<(), &'static str> {
+	unsafe {
+		fn term() -> ! {
+			panic::resume_unwind(Box::new(()));
+		}
+		let term = term as *const () as usize;
+		signal(SIGINT, term);
+		signal(SIGTERM, term);
+	}
+
+	let mut args = env::args();
+	let action = args.nth(1);
+	return match action.as_deref() {
+		Some("login") => login(args),
+		Some("run") => run(args),
+		_ => {
+			eprintln!("valid actions: login, run");
+			return Err("invalid action");
+		}
+	};
 }
