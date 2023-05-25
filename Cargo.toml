@@ -3,8 +3,6 @@ name = "allofmyfriends"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 colored = "2.0.0"
 const_format = "0.2.30"
@@ -12,3 +10,5 @@ libc = "0.2.144"
 reqwest = { version = "0.11.18", features = ["blocking", "json", "native-tls", "native-tls-alpn"] }
 serde = { version = "1.0.163", features = ["derive"] }
 serde_json = "1.0.96"
+base64 = { git = "https://github.com/bridgeloop/base64.git", features = ["encode-ct"] }
+dropfile = { git = "https://github.com/bridgeloop/dropfile.git" }

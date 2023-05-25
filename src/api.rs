@@ -1,22 +1,17 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
 use reqwest::blocking::{Client, ClientBuilder, Response};
 
-use {
-	const_format::formatcp,
-	crate::base64,
-	std::str::from_utf8,
-};
-
+use {const_format::formatcp, base64};
 
 // both of these values were taken from the macOS Epic Games Launcher
 const CLIENT_ID: &'static str = "34a02cf8f4414e29b15921876da36f9a";
 const CLIENT_SECRET: &'static str = "daafbccc737745039dffe53d94fc76cf";
-fn client_auth() -> String {
-	let token = format!("{CLIENT_ID}:{CLIENT_SECRET}");
-	let b64 = base64::encode(token.as_bytes()).expect("encode");
-	let b64 = from_utf8(&(b64)).expect("from_utf8");
-	return format!("basic {}", b64);
-}
+const CLIENT_AUTH_STR: &'static str = formatcp!("{CLIENT_ID}:{CLIENT_SECRET}");
+const CLIENT_AUTH:
+	[u8; base64::encode_sz::encoder_output_size_usize_panic(CLIENT_AUTH_STR.len())] = 
+	base64::encode_ct::array_from(
+		CLIENT_AUTH_STR.as_bytes()
+	);
 
 pub const LOGIN: &'static str = formatcp!(
 	"https://www.epicgames.com/id/login?lang=en-US&redirectUrl=https%3A%2F%2Fwww.epicgames.com%2Fid%2Fapi%2Fredirect%3FclientId%3D{}%26responseType%3Dcode",
@@ -116,7 +111,7 @@ impl Api {
 			.build()
 			.map_err(|_| In("failed to build reqwest client"))?;
 		let exch = cl.post("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token")
-			.header("authorization", client_auth())
+			.header("authorization", CLIENT_ID)
 			.header("content-type", "application/x-www-form-urlencoded")
 			.body(format!("grant_type=authorization_code&code={auth}&token_type=eg1"))
 			.send()

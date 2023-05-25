@@ -1,9 +1,7 @@
 // aiden@cmp.bz
 
 mod api;
-mod base64;
-mod clean_file;
-use clean_file::*;
+use dropfile::*;
 
 use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic};
 use api::ApiError::*;
@@ -12,7 +10,7 @@ use libc::{signal, SIGINT, SIGTERM};
 fn login(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
-	let mut file = CleanFile::open(path, true)?;
+	let mut file = DropFile::open(&(path), true)?;
 
 	if Command::new("xdg-open").arg(api::LOGIN).spawn().is_err() {
 		println!("{}", api::LOGIN);
@@ -56,7 +54,7 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 fn run(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
-	let mut file = CleanFile::open(path, false)?;
+	let mut file = DropFile::open(&(path), false)?;
 
 	return Ok(());
 }
