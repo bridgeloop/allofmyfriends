@@ -1,4 +1,6 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
+use std::io::{Read, Write};
+
 use reqwest::blocking::{Client, ClientBuilder, Response};
 
 use {const_format::formatcp, base64};
@@ -7,11 +9,15 @@ use {const_format::formatcp, base64};
 const CLIENT_ID: &'static str = "34a02cf8f4414e29b15921876da36f9a";
 const CLIENT_SECRET: &'static str = "daafbccc737745039dffe53d94fc76cf";
 const CLIENT_AUTH_STR: &'static str = formatcp!("{CLIENT_ID}:{CLIENT_SECRET}");
-const CLIENT_AUTH:
-	[u8; base64::encode_sz::encoder_output_size_usize_panic(CLIENT_AUTH_STR.len())] = 
+const CLIENT_AUTH_B64:
+	[u8; base64::encode_sz::encoder_output_size_usize_panic(CLIENT_AUTH_STR.len())] =
 	base64::encode_ct::array_from(
 		CLIENT_AUTH_STR.as_bytes()
 	);
+const CLIENT_AUTH: &'static str = formatcp!(
+	"basic {}",
+	unsafe { core::mem::transmute::<&'static [u8], &'static str>(CLIENT_AUTH_B64.as_slice()) }
+);
 
 pub const LOGIN: &'static str = formatcp!(
 	"https://www.epicgames.com/id/login?lang=en-US&redirectUrl=https%3A%2F%2Fwww.epicgames.com%2Fid%2Fapi%2Fredirect%3FclientId%3D{}%26responseType%3Dcode",
@@ -103,15 +109,18 @@ pub struct Api {
 
 	eg1_cache: String,
 }
+fn reqwest_cl<T>() -> Result<Client, ApiError<T>> {
+	return ClientBuilder::new()
+		.use_native_tls()
+		.http2_prior_knowledge()
+		.build()
+		.map_err(|_| In("failed to build reqwest client"));
+}
 impl Api {
 	pub fn new(auth: &str) -> Result<Self, ApiError<TokenError>> {
-		let cl = ClientBuilder::new()
-			.use_native_tls()
-			.http2_prior_knowledge()
-			.build()
-			.map_err(|_| In("failed to build reqwest client"))?;
+		let cl = reqwest_cl()?;
 		let exch = cl.post("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token")
-			.header("authorization", CLIENT_ID)
+			.header("authorization", CLIENT_AUTH)
 			.header("content-type", "application/x-www-form-urlencoded")
 			.body(format!("grant_type=authorization_code&code={auth}&token_type=eg1"))
 			.send()
@@ -120,6 +129,21 @@ impl Api {
 		let tkn_resp: TokenResponse = status(exch)?;
 		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
 
+		return Ok(Self {
+			cl, tkn_resp,
+			eg1_cache: eg1,
+		});
+	}
+	pub fn exp<T: Write>(&self, to: T) -> Result<(), ()> {
+		return match serde_json::to_writer(to, self.token_response()) {
+			Ok(_) => Ok(()),
+			Err(_) => Err(()),
+		};
+	}
+	pub fn resume<T: Read>(ctx: &mut T) -> Result<Self, ApiError<TokenError>> {
+		let mut cl = reqwest_cl()?;
+		let tkn_resp: TokenResponse = serde_json::de::from_reader(ctx).map_err(|_| In("failed to resume session"))?;
+		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
 		return Ok(Self {
 			cl, tkn_resp,
 			eg1_cache: eg1,

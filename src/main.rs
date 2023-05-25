@@ -7,6 +7,10 @@ use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic
 use api::ApiError::*;
 use libc::{signal, SIGINT, SIGTERM};
 
+fn cont(mut api: api::Api) -> Result<(), &'static str> {
+	return Ok(());
+}
+
 fn login(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
@@ -42,12 +46,11 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 			return "unknown error"
 		}
 	})?;
+	api.exp(file).map_err(|_| "failed to write file")?;
 
-	let res = file.write(serde_json::ser::to_string(
-		api.token_response()
-	).unwrap().as_bytes());
-	res.expect("failed to write file");
-
+	if args.next().as_deref() == Some("run") {
+		return cont(api);
+	}
 	return Ok(());
 }
 
@@ -55,8 +58,11 @@ fn run(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
 	let mut file = DropFile::open(&(path), false)?;
-
-	return Ok(());
+	let api = api::Api::resume(&mut(file)).map_err(|err| match err {
+		_ => "session resume error",
+	})?;
+	println!("successfully resumed");
+	return cont(api);
 }
 
 fn main() -> Result<(), &'static str> {
