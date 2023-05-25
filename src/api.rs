@@ -1,6 +1,7 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
-use std::io::{Read, Write};
+use std::io::{Read, Write, Seek};
 
+use dropfile::DropFile;
 use reqwest::blocking::{Client, ClientBuilder, Response};
 
 use {const_format::formatcp, base64};
@@ -27,8 +28,8 @@ pub const LOGIN: &'static str = formatcp!(
 fn status<T: DeserializeOwned, E: DeserializeOwned>(resp: Response) -> Result<T, ApiError<E>> {
 	if resp.status() != 200 {
 		let error_text = resp.text().map_err(|_| In("failed to read response"))?;
+		eprintln!("{error_text:?}");
 		let error: E = serde_json::from_str(&(error_text)).map_err(|_err| {
-			//eprintln!("{_err:?} {error_text:?}");
 			return In("failed to decode error");
 		})?;
 		return Err(ApiError::Eg(error));
@@ -134,20 +135,33 @@ impl Api {
 			eg1_cache: eg1,
 		});
 	}
-	pub fn exp<T: Write>(&self, to: T) -> Result<(), ()> {
-		return match serde_json::to_writer(to, self.token_response()) {
-			Ok(_) => Ok(()),
-			Err(_) => Err(()),
-		};
+	pub fn exp(&self, mut to: DropFile) -> Result<(), ()> {
+		to.rewind().map_err(|_| ())?;
+		serde_json::to_writer(&mut(to), self.token_response()).map_err(|_| ())?;
+		to.trunc_to_cursor().map_err(|_| ())?;
+		return Ok(());
 	}
 	pub fn resume<T: Read>(ctx: &mut T) -> Result<Self, ApiError<TokenError>> {
-		let mut cl = reqwest_cl()?;
+		let cl = reqwest_cl()?;
 		let tkn_resp: TokenResponse = serde_json::de::from_reader(ctx).map_err(|_| In("failed to resume session"))?;
 		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
-		return Ok(Self {
+		let mut new = Self {
 			cl, tkn_resp,
 			eg1_cache: eg1,
-		});
+		};
+		new.refresh()?;
+		return Ok(new);
+	}
+
+	pub fn refresh(&mut self) -> Result<(), ApiError<TokenError>> {
+		let refr = self.cl.post("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token")
+			.header("authorization", CLIENT_AUTH)
+			.header("content-type", "application/x-www-form-urlencoded")
+			.body(format!("grant_type=refresh_token&refresh_token={}&includePerms=false", self.token_response().refresh_token))
+			.send()
+			.map_err(|_| In("refresh"))?;
+		self.tkn_resp = status(refr)?;
+		return Ok(());
 	}
 
 	pub fn token_response(&self) -> &TokenResponse {

@@ -61,6 +61,7 @@ fn run(mut args: Args) -> Result<(), &'static str> {
 	let api = api::Api::resume(&mut(file)).map_err(|err| match err {
 		_ => "session resume error",
 	})?;
+	api.exp(file).map_err(|_| "failed to write file")?;
 	println!("successfully resumed");
 	return cont(api);
 }
