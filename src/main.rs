@@ -1,6 +1,8 @@
 // aiden@cmp.bz
 
 mod api;
+use api::Api;
+
 use dropfile::*;
 
 use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic};
@@ -9,7 +11,7 @@ use libc::{signal, SIGINT, SIGTERM};
 
 use crate::api::{ApiError, FriendsError};
 
-fn cont(mut api: api::Api) -> Result<(), &'static str> {
+fn cont(api: &mut Api) -> Result<(), &'static str> {
 	let x: serde_json::Value = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
 	println!("{:?}", x);
 	return Ok(());
@@ -38,7 +40,7 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 	};
 	println!("proceeding!");
 
-	let api = api::Api::new(auth.trim()).map_err(|err| match err {
+	let mut api = api::Api::new(auth.trim()).map_err(|err| match err {
 		Eg(eg) if eg.code == "errors.com.epicgames.common.oauth.invalid_client" => {
 			return "invalid client - open an issue";
 		}
@@ -50,24 +52,29 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 			return "unknown error"
 		}
 	})?;
-	api.exp(file).map_err(|_| "failed to write file")?;
 
-	if args.next().as_deref() == Some("run") {
-		return cont(api);
-	}
-	return Ok(());
+	let result = if args.next().as_deref() == Some("run") {
+		cont(&mut(api))
+	} else {
+		Ok(())
+	};
+	api.exp(file).map_err(|_| "failed to write file")?;
+	return result;
 }
 
 fn run(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
 	let mut file = DropFile::open(&(path), false)?;
-	let api = api::Api::resume(&mut(file)).map_err(|err| match err {
+	let mut api = api::Api::resume(&mut(file)).map_err(|err| match err {
 		_ => "session resume error",
 	})?;
-	api.exp(file).map_err(|_| "failed to write file")?;
+
 	println!("successfully resumed");
-	return cont(api);
+
+	let result = cont(&mut(api));
+	api.exp(file).map_err(|_| "failed to write file")?;
+	return result;
 }
 
 fn main() -> Result<(), &'static str> {

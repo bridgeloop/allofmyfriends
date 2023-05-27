@@ -149,12 +149,15 @@ fn reqwest_cl<T>() -> Result<Client, ApiError<T>> {
 fn decode<T: DeserializeOwned, E: DeserializeOwned>(resp: Response) -> Result<T, ApiError<E>> {
 	let resp = resp.text().map_err(|_| In("failed to read response"))?;
 	#[cfg(debug_assertions)]
-	eprintln!("{resp:?}");
+	eprintln!("{}", resp.trim());
 	let error: serde_json::error::Result<E> = serde_json::from_str(&(resp));
 	if let Ok(error) = error {
 		return Err(ApiError::Eg(error));
 	}
 	return Ok(serde_json::from_str(&(resp)).map_err(|_| In("failed to decode response"))?);
+}
+fn eg1(tkn_resp: &TokenResponse) -> String {
+	return format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
 }
 impl Api {
 	fn call_internal<U: IntoUrl, B: Into<Body>, T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
@@ -207,6 +210,7 @@ impl Api {
 			Some(headers),
 			Some(format!("grant_type=refresh_token&refresh_token={}&includePerms=false", self.token_response().refresh_token))
 		)?;
+		self.eg1_cache = eg1(&(self.tkn_resp));
 		return Ok(());
 	}
 
@@ -220,7 +224,7 @@ impl Api {
 			.map_err(|_| In("exch"))?;
 
 		let tkn_resp: TokenResponse = decode(exch)?;
-		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
+		let eg1 = eg1(&(tkn_resp));
 
 		return Ok(Self {
 			cl, tkn_resp,
@@ -230,7 +234,7 @@ impl Api {
 	pub fn resume<T: Read>(ctx: &mut T) -> Result<Self, ApiError<TokenError>> {
 		let cl = reqwest_cl()?;
 		let tkn_resp: TokenResponse = serde_json::de::from_reader(ctx).map_err(|_| In("failed to resume session"))?;
-		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
+		let eg1 = eg1(&(tkn_resp));
 
 		return Ok(Self {
 			cl, tkn_resp,
