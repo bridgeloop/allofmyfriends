@@ -7,14 +7,18 @@ use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic
 use api::ApiError::*;
 use libc::{signal, SIGINT, SIGTERM};
 
+use crate::api::{ApiError, FriendsError};
+
 fn cont(mut api: api::Api) -> Result<(), &'static str> {
+	let x: serde_json::Value = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
+	println!("{:?}", x);
 	return Ok(());
 }
 
 fn login(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
-	let mut file = DropFile::open(&(path), true)?;
+	let file = DropFile::open(&(path), true)?;
 
 	if Command::new("xdg-open").arg(api::LOGIN).spawn().is_err() {
 		println!("{}", api::LOGIN);

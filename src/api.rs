@@ -1,8 +1,8 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
-use std::io::{Read, Write, Seek};
+use std::io::{Read, Seek};
 
 use dropfile::DropFile;
-use reqwest::blocking::{Client, ClientBuilder, Response};
+use reqwest::{blocking::{Client, ClientBuilder, Response, Body}, IntoUrl, header::{HeaderMap, HeaderValue}};
 
 use {const_format::formatcp, base64};
 
@@ -24,18 +24,6 @@ pub const LOGIN: &'static str = formatcp!(
 	"https://www.epicgames.com/id/login?lang=en-US&redirectUrl=https%3A%2F%2Fwww.epicgames.com%2Fid%2Fapi%2Fredirect%3FclientId%3D{}%26responseType%3Dcode",
 	CLIENT_ID
 );
-
-fn status<T: DeserializeOwned, E: DeserializeOwned>(resp: Response) -> Result<T, ApiError<E>> {
-	if resp.status() != 200 {
-		let error_text = resp.text().map_err(|_| In("failed to read response"))?;
-		eprintln!("{error_text:?}");
-		let error: E = serde_json::from_str(&(error_text)).map_err(|_err| {
-			return In("failed to decode error");
-		})?;
-		return Err(ApiError::Eg(error));
-	}
-	return Ok(resp.json().map_err(|_| In("failed to decode response"))?);
-}
 
 ////////////////
 
@@ -75,6 +63,11 @@ pub const FRIENDS_QUERY: GqlOp = GqlOp!(r#"query {
 
 ////////////////
 
+pub trait ApiTokenExpired {
+	fn token_expired(&self) -> bool;
+}
+
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TokenResponse {
 	access_token: String,
@@ -93,6 +86,36 @@ pub struct TokenError {
 	#[serde(rename(deserialize = "errorCode"))]
 	pub code: String,
 }
+impl ApiTokenExpired for TokenError {
+	fn token_expired(&self) -> bool {
+		return self.code == "errors.com.epicgames.common.authentication.token_verification_failed" /* ? */;
+	}
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct FriendsResponse {
+}
+
+#[derive(Debug)]
+pub struct FriendsError {
+	pub code: String,
+}
+impl ApiTokenExpired for FriendsError {
+	fn token_expired(&self) -> bool {
+		return self.code == "errors.com.epicgames.common.authentication.token_verification_failed";
+	}
+}
+impl<'de> Deserialize<'de> for FriendsError {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let json = serde_json::Value::deserialize(deserializer)?;
+		let x = || -> Option<String> {
+			let x: serde_json::Value = serde_json::de::from_str(json.as_object()?.get("errors")?.as_array()?.get(0)?.as_object()?.get("serviceResponse")?.as_str()?).ok()?;
+			return x.as_object()?.get("errorCode")?.as_str().map(|inner| inner.to_string());
+		};
+		let code = x().ok_or(serde::de::Error::missing_field("errorCode"))?;
+		return Ok(Self { code, });
+	}
+}
 
 
 #[derive(Debug)]
@@ -101,6 +124,7 @@ pub enum ApiError<E> {
 	In(&'static str),
 }
 use ApiError::In;
+use serde::Deserialize;
 
 ////////////////
 
@@ -117,7 +141,70 @@ fn reqwest_cl<T>() -> Result<Client, ApiError<T>> {
 		.build()
 		.map_err(|_| In("failed to build reqwest client"));
 }
+fn decode<T: DeserializeOwned, E: DeserializeOwned>(resp: Response) -> Result<T, ApiError<E>> {
+	let resp = resp.text().map_err(|_| In("failed to read response"))?;
+	#[cfg(debug_assertions)]
+	eprintln!("{resp:?}");
+	let error: serde_json::error::Result<E> = serde_json::from_str(&(resp));
+	if let Ok(error) = error {
+		return Err(ApiError::Eg(error));
+	}
+	return Ok(serde_json::from_str(&(resp)).map_err(|_| In("failed to decode response"))?);
+}
 impl Api {
+	fn call_internal<U: IntoUrl, B: Into<Body>, T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
+		&mut self,
+		url: &U,
+		headers: Option<HeaderMap<HeaderValue>>,
+		body: Option<B>
+	) -> Result<T, ApiError<E>> {
+		let mut req = if body.is_none() {
+			self.cl.get(url.as_str())
+		} else {
+			self.cl.post(url.as_str())
+		};
+		if let Some(headers) = headers {
+			req = req.headers(headers);
+		}
+		if let Some(body) = body {
+			req = req.body(body);
+		}
+		let resp = req.send().map_err(|_| In("api call"))?;
+		return decode(resp);
+	}
+	fn call<U: IntoUrl, B: Into<Body> + Clone, T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
+		&mut self,
+		url: U,
+		headers: Option<HeaderMap<HeaderValue>>,
+		body: Option<B>
+	) -> Result<T, ApiError<E>> {
+		let headers_clone = headers.clone();
+		let body_clone = body.clone();
+
+		let r = self.call_internal(&(url), headers, body);
+		let Err(ApiError::Eg(err)) = &(r) else {
+			return r;
+		};
+		if !err.token_expired() {
+			return r;
+		}
+		if self.refresh().is_err() {
+			return r;
+		}
+		return self.call_internal(&(url), headers_clone, body_clone);
+	}
+	fn refresh(&mut self) -> Result<(), ApiError<TokenError>> {
+		let mut headers = HeaderMap::new();
+		headers.insert("authorization", HeaderValue::from_static(CLIENT_AUTH));
+		headers.insert("content-type", HeaderValue::from_static("application/x-www-form-urlencoded"));
+		self.tkn_resp = self.call_internal(
+			&("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token"),
+			Some(headers),
+			Some(format!("grant_type=refresh_token&refresh_token={}&includePerms=false", self.token_response().refresh_token))
+		)?;
+		return Ok(());
+	}
+
 	pub fn new(auth: &str) -> Result<Self, ApiError<TokenError>> {
 		let cl = reqwest_cl()?;
 		let exch = cl.post("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token")
@@ -127,7 +214,7 @@ impl Api {
 			.send()
 			.map_err(|_| In("exch"))?;
 
-		let tkn_resp: TokenResponse = status(exch)?;
+		let tkn_resp: TokenResponse = decode(exch)?;
 		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
 
 		return Ok(Self {
@@ -135,32 +222,21 @@ impl Api {
 			eg1_cache: eg1,
 		});
 	}
-	pub fn exp(&self, mut to: DropFile) -> Result<(), ()> {
-		to.rewind().map_err(|_| ())?;
-		serde_json::to_writer(&mut(to), self.token_response()).map_err(|_| ())?;
-		to.trunc_to_cursor().map_err(|_| ())?;
-		return Ok(());
-	}
 	pub fn resume<T: Read>(ctx: &mut T) -> Result<Self, ApiError<TokenError>> {
 		let cl = reqwest_cl()?;
 		let tkn_resp: TokenResponse = serde_json::de::from_reader(ctx).map_err(|_| In("failed to resume session"))?;
 		let eg1 = format!("{} {}", tkn_resp.token_type, tkn_resp.access_token);
-		let mut new = Self {
+
+		return Ok(Self {
 			cl, tkn_resp,
 			eg1_cache: eg1,
-		};
-		new.refresh()?;
-		return Ok(new);
+		});
 	}
 
-	pub fn refresh(&mut self) -> Result<(), ApiError<TokenError>> {
-		let refr = self.cl.post("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token")
-			.header("authorization", CLIENT_AUTH)
-			.header("content-type", "application/x-www-form-urlencoded")
-			.body(format!("grant_type=refresh_token&refresh_token={}&includePerms=false", self.token_response().refresh_token))
-			.send()
-			.map_err(|_| In("refresh"))?;
-		self.tkn_resp = status(refr)?;
+	pub fn exp(&self, mut to: DropFile) -> Result<(), ()> {
+		to.rewind().map_err(|_| ())?;
+		serde_json::to_writer(&mut(to), self.token_response()).map_err(|_| ())?;
+		to.trunc_to_cursor().map_err(|_| ())?;
 		return Ok(());
 	}
 
@@ -172,7 +248,7 @@ impl Api {
 		return self.eg1_cache.as_str();
 	}
 
-	pub fn gql<T: serde::de::DeserializeOwned>(&mut self, op: GqlOp) -> Result<T, ApiError<()>> {
+	pub fn gql<T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(&mut self, op: GqlOp) -> Result<T, ApiError<E>> {
 		// to everyone reading this:
 		// did you know if your website has a user-agent whitelist, then you might [redacted]? [redacted] :-)
 		const UA: &'static str = "\
@@ -183,14 +259,12 @@ impl Api {
 			Chrome/90.0.4430.212 \
 			Safari/537.36\
 		";
-		
-		let resp = self.cl.post("https://launcher.store.epicgames.com/graphql")
-			.header("authorization", self.eg1())
-			.header("content-type", "application/json")
-			.header("user-agent", UA)
-			.body(serde_json::to_string(&(op)).map_err(|_| In("to_string"))?)
-			.send()
-			.map_err(|err| { eprintln!("{err:?}"); In("gql") })?;
-		return status(resp);
+
+		let mut headers = HeaderMap::new();
+		headers.insert("authorization", HeaderValue::from_str(self.eg1()).unwrap());
+		headers.insert("content-type", HeaderValue::from_static("application/json"));
+		headers.insert("user-agent", HeaderValue::from_static(UA));
+		let body = serde_json::to_string(&(op)).map_err(|_| In("to_string"))?;
+		return self.call("https://launcher.store.epicgames.com/graphql", Some(headers), Some(body));
 	}
 }
