@@ -107,13 +107,18 @@ impl ApiTokenExpired for FriendsError {
 }
 impl<'de> Deserialize<'de> for FriendsError {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		let json = serde_json::Value::deserialize(deserializer)?;
-		let x = || -> Option<String> {
-			let x: serde_json::Value = serde_json::de::from_str(json.as_object()?.get("errors")?.as_array()?.get(0)?.as_object()?.get("serviceResponse")?.as_str()?).ok()?;
-			return x.as_object()?.get("errorCode")?.as_str().map(|inner| inner.to_string());
-		};
-		let code = x().ok_or(serde::de::Error::missing_field("errorCode"))?;
-		return Ok(Self { code, });
+		#[derive(Deserialize)]
+		struct InnerStruct {
+			#[serde(rename = "serviceResponse")]
+			service_response: String,
+		}
+		#[derive(Deserialize)]
+		struct FuckStruct {
+			errors: [InnerStruct; 1],
+		}
+		let resp = FuckStruct::deserialize(deserializer)?;
+		let tkn = serde_json::from_str::<TokenError>(&(resp.errors[0].service_response)).map_err(|_| serde::de::Error::missing_field("errorCode"))?;
+		return Ok(Self { code: tkn.code });
 	}
 }
 
