@@ -127,8 +127,9 @@ impl<'de> Deserialize<'de> for FriendsError {
 pub enum ApiError<E> {
 	Eg(E),
 	In(&'static str),
+	//Again,
 }
-use ApiError::In;
+use ApiError::*;
 use serde::Deserialize;
 
 ////////////////
@@ -162,7 +163,7 @@ fn eg1(tkn_resp: &TokenResponse) -> String {
 impl Api {
 	fn call_internal<U: IntoUrl, B: Into<Body>, T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
 		&mut self,
-		url: &U,
+		url: U,
 		headers: Option<HeaderMap<HeaderValue>>,
 		body: Option<B>
 	) -> Result<T, ApiError<E>> {
@@ -180,33 +181,31 @@ impl Api {
 		let resp = req.send().map_err(|_| In("api call"))?;
 		return decode(resp);
 	}
-	fn call<U: IntoUrl, B: Into<Body> + Clone, T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
+	fn call<U: IntoUrl, B: Into<Body>, F: Fn(&Self) -> (U, Option<HeaderMap<HeaderValue>>, Option<B>), T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
 		&mut self,
-		url: U,
-		headers: Option<HeaderMap<HeaderValue>>,
-		body: Option<B>
+		gen_req: F,
 	) -> Result<T, ApiError<E>> {
-		let headers_clone = headers.clone();
-		let body_clone = body.clone();
-
-		let r = self.call_internal(&(url), headers, body);
-		let Err(ApiError::Eg(err)) = &(r) else {
-			return r;
+		let (url, headers, body) = gen_req(self);
+		let result = self.call_internal(url, headers, body);
+		let Err(ApiError::Eg(err)) = &(result) else {
+			return result;
 		};
-		if !err.token_expired() {
-			return r;
+		if
+			!err.token_expired() ||
+			self.refresh().is_err()
+		{
+			return result;
 		}
-		if self.refresh().is_err() {
-			return r;
-		}
-		return self.call_internal(&(url), headers_clone, body_clone);
+		
+		let (url, headers, body) = gen_req(self);
+		return self.call_internal(url, headers, body);
 	}
 	fn refresh(&mut self) -> Result<(), ApiError<TokenError>> {
 		let mut headers = HeaderMap::new();
 		headers.insert("authorization", HeaderValue::from_static(CLIENT_AUTH));
 		headers.insert("content-type", HeaderValue::from_static("application/x-www-form-urlencoded"));
 		self.tkn_resp = self.call_internal(
-			&("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token"),
+			"https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token",
 			Some(headers),
 			Some(format!("grant_type=refresh_token&refresh_token={}&includePerms=false", self.token_response().refresh_token))
 		)?;
@@ -269,11 +268,17 @@ impl Api {
 			Safari/537.36\
 		";
 
-		let mut headers = HeaderMap::new();
-		headers.insert("authorization", HeaderValue::from_str(self.eg1()).unwrap());
-		headers.insert("content-type", HeaderValue::from_static("application/json"));
-		headers.insert("user-agent", HeaderValue::from_static(UA));
-		let body = serde_json::to_string(&(op)).map_err(|_| In("to_string"))?;
-		return self.call("https://launcher.store.epicgames.com/graphql", Some(headers), Some(body));
+		return self.call(|this: &Self| -> (&str, Option<HeaderMap>, Option<String>) {
+			let mut headers = HeaderMap::new();
+			headers.insert("authorization", HeaderValue::from_str(this.eg1()).unwrap());
+			headers.insert("content-type", HeaderValue::from_static("application/json"));
+			headers.insert("user-agent", HeaderValue::from_static(UA));
+
+			return (
+				"https://launcher.store.epicgames.com/graphql",
+				Some(headers),
+				Some(serde_json::to_string(&(op)).unwrap())
+			);
+		});
 	}
 }
