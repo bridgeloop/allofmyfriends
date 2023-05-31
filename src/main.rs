@@ -1,23 +1,39 @@
 // aiden@cmp.bz
 
 mod api;
-use api::{Api, ApiError::{self, *}, FriendsError};
+use api::{Api, ApiError::{self, *}, Friends, FriendsError};
 
 use dropfile::*;
 
 use libc::{signal, SIGINT, SIGTERM};
-use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic};
-use tungstenite;
+use std::{env::{self, Args}, process::Command, io::{stdout, stdin, ErrorKind::WouldBlock, Write}, panic, time::Duration};
+use tungstenite::{error::Error::Io, Message, stream::MaybeTlsStream::NativeTls};
 
 fn cont(api: &mut Api) -> Result<(), &'static str> {
-	let friends: serde_json::Value = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
-	println!("{:?}", friends);
+	let friends: Friends = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
+	println!("{}-----------", friends);
 	let (mut ws, _) = tungstenite::connect(
-		format!("wss://connect.ol.epicgames.com/?auth-token={}", api.token_response().eg1())
+		format!("wss://connect.ol.epicgames.com/?auth-token={}", api.token_response().access_token)
 	).map_err(|_| "failed to connect websocket")?;
+	ws.write_message(Message::Text(
+		"SUBSCRIBE\n".to_owned()
+	)).unwrap();
+	let NativeTls(stream) = ws.get_mut() else {
+		panic!();
+	};
+	stream.get_mut().set_read_timeout(Some(Duration::from_secs(40))).unwrap();
 	loop {
-		let msg = ws.read_message().expect("read_message");
-		println!("{msg}");
+		match ws.read_message() {
+			Ok(Message::Binary(msg)) => {
+				let sl = &(msg[msg.windows(2).position(|sl| sl == b"\n\n").unwrap() + 2..msg.len() - 1]);
+				let json: serde_json::Value = serde_json::de::from_slice(sl).unwrap();
+				println!("{json}");
+			}
+			//Ok(_) => (),
+			Err(Io(e)) if e.kind() == WouldBlock => (),
+			_ => panic!(),
+		};
+		ws.write_message(Message::Pong(vec![])).unwrap();
 	}
 }
 

@@ -1,5 +1,7 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
 
+use std::fmt::{Display, Debug};
+
 use dropfile::DropFile;
 use reqwest::{blocking::{Client, ClientBuilder, Response, Body}, IntoUrl, header::{HeaderMap, HeaderValue}};
 
@@ -69,20 +71,15 @@ pub trait ApiTokenExpired {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TokenResponse {
-	access_token: String,
+	pub access_token: String,
 	expires_at: String,
 	token_type: String,
-	account_id: String,
+	pub account_id: String,
 	refresh_token: String,
 	refresh_expires_at: String,
 
 	#[serde(rename = "displayName")]
 	display_name: String,
-}
-impl TokenResponse {
-	pub fn eg1(&self) -> &str {
-		return &(self.access_token);
-	}
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -96,8 +93,53 @@ impl ApiTokenExpired for TokenError {
 	}
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct FriendsResponse {
+#[derive(Debug, Deserialize, Clone)]
+pub struct FriendsAccount {
+	#[serde(rename = "displayName")]
+	pub display_name: Option<String>,
+	pub id: String,
+}
+impl Display for FriendsAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    	return write!(f, "display name: {}\nid: {}\n", self.display_name.as_deref().unwrap_or("[none]"), self.id);
+    }
+}
+#[derive(Debug)]
+pub struct Friends(Vec<FriendsAccount>);
+impl Display for Friends {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    	for friend in self.0.iter() {
+    		std::fmt::Display::fmt(&(friend), f)?;
+    	}
+    	return Ok(());
+    }
+}
+impl<'de> Deserialize<'de> for Friends {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		#[derive(Deserialize)]
+		struct FriendsAccounts {
+			account: [FriendsAccount; 1],
+		}
+		#[derive(Deserialize)]
+		struct FriendsFriends {
+			friends: Vec<FriendsAccounts>,
+		}
+		#[derive(Deserialize)]
+		struct FriendsSummary {
+			summary: FriendsFriends,
+		}
+		#[derive(Deserialize)]
+		struct FriendsData {
+			#[serde(rename = "Friends")]
+			friends: FriendsSummary,
+		}
+		#[derive(Deserialize)]
+		struct FriendsResponse {
+			data: FriendsData,
+		}
+		let resp = FriendsResponse::deserialize(deserializer).unwrap();
+		return Ok(Self(resp.data.friends.summary.friends.iter().map(|accounts| accounts.account[0].clone()).collect()));
+	}
 }
 
 #[derive(Debug)]
