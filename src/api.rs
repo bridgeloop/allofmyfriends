@@ -1,5 +1,4 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
-use std::io::{Read, Seek};
 
 use dropfile::DropFile;
 use reqwest::{blocking::{Client, ClientBuilder, Response, Body}, IntoUrl, header::{HeaderMap, HeaderValue}};
@@ -80,6 +79,11 @@ pub struct TokenResponse {
 	#[serde(rename = "displayName")]
 	display_name: String,
 }
+impl TokenResponse {
+	pub fn eg1(&self) -> &str {
+		return &(self.access_token);
+	}
+}
 
 #[derive(Debug, serde::Deserialize)]
 pub struct TokenError {
@@ -139,6 +143,8 @@ pub struct Api {
 	tkn_resp: TokenResponse,
 
 	eg1_cache: String,
+
+	file: DropFile,
 }
 fn reqwest_cl<T>() -> Result<Client, ApiError<T>> {
 	return ClientBuilder::new()
@@ -181,11 +187,11 @@ impl Api {
 		let resp = req.send().map_err(|_| In("api call"))?;
 		return decode(resp);
 	}
-	fn call<U: IntoUrl, B: Into<Body>, F: Fn(&Self) -> (U, Option<HeaderMap<HeaderValue>>, Option<B>), T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
+	fn call<U: IntoUrl, B: Into<Body>, F: Fn(&Self) -> Option<(U, Option<HeaderMap<HeaderValue>>, Option<B>)>, T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(
 		&mut self,
 		gen_req: F,
 	) -> Result<T, ApiError<E>> {
-		let (url, headers, body) = gen_req(self);
+		let (url, headers, body) = gen_req(self).ok_or(In("gen_req failed"))?;
 		let result = self.call_internal(url, headers, body);
 		let Err(ApiError::Eg(err)) = &(result) else {
 			return result;
@@ -197,7 +203,7 @@ impl Api {
 			return result;
 		}
 		
-		let (url, headers, body) = gen_req(self);
+		let (url, headers, body) = gen_req(self).ok_or(In("gen_req failed"))?;
 		return self.call_internal(url, headers, body);
 	}
 	fn refresh(&mut self) -> Result<(), ApiError<TokenError>> {
@@ -210,10 +216,11 @@ impl Api {
 			Some(format!("grant_type=refresh_token&refresh_token={}&includePerms=false", self.token_response().refresh_token))
 		)?;
 		self.eg1_cache = eg1(&(self.tkn_resp));
+		self.exp().map_err(|err| In(err))?;
 		return Ok(());
 	}
 
-	pub fn new(auth: &str) -> Result<Self, ApiError<TokenError>> {
+	pub fn new(auth: &str, file: DropFile) -> Result<Self, ApiError<TokenError>> {
 		let cl = reqwest_cl()?;
 		let exch = cl.post("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token")
 			.header("authorization", CLIENT_AUTH)
@@ -228,24 +235,27 @@ impl Api {
 		return Ok(Self {
 			cl, tkn_resp,
 			eg1_cache: eg1,
+			file,
 		});
 	}
-	pub fn resume<T: Read>(ctx: &mut T) -> Result<Self, ApiError<TokenError>> {
+	pub fn resume(mut file: DropFile) -> Result<Self, ApiError<TokenError>> {
 		let cl = reqwest_cl()?;
-		let tkn_resp: TokenResponse = serde_json::de::from_reader(ctx).map_err(|_| In("failed to resume session"))?;
+		let tkn_resp: TokenResponse = serde_json::de::from_reader(&mut(file)).map_err(|_| In("failed to resume session"))?;
 		let eg1 = eg1(&(tkn_resp));
 
 		return Ok(Self {
 			cl, tkn_resp,
 			eg1_cache: eg1,
+			file,
 		});
 	}
 
-	pub fn exp(&self, mut to: DropFile) -> Result<(), ()> {
-		to.rewind().map_err(|_| ())?;
-		serde_json::to_writer(&mut(to), self.token_response()).map_err(|_| ())?;
-		to.trunc_to_cursor().map_err(|_| ())?;
-		return Ok(());
+	fn exp(&mut self) -> Result<(), &'static str> {
+		return serde_json::to_string(self.token_response())
+			.map_err(|_| "failed to serialize token_response")
+			.and_then(|tkn_resp|
+				self.file.write_trunc(tkn_resp).map(|_| ())
+			);
 	}
 
 	pub fn token_response(&self) -> &TokenResponse {
@@ -268,17 +278,17 @@ impl Api {
 			Safari/537.36\
 		";
 
-		return self.call(|this: &Self| -> (&str, Option<HeaderMap>, Option<String>) {
+		return self.call(|this: &Self| -> Option<(&str, Option<HeaderMap>, Option<String>)> {
 			let mut headers = HeaderMap::new();
 			headers.insert("authorization", HeaderValue::from_str(this.eg1()).unwrap());
 			headers.insert("content-type", HeaderValue::from_static("application/json"));
 			headers.insert("user-agent", HeaderValue::from_static(UA));
 
-			return (
+			return Some((
 				"https://launcher.store.epicgames.com/graphql",
 				Some(headers),
-				Some(serde_json::to_string(&(op)).unwrap())
-			);
+				Some(serde_json::to_string(&(op)).ok()?)
+			));
 		});
 	}
 }

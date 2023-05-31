@@ -1,26 +1,30 @@
 // aiden@cmp.bz
 
 mod api;
-use api::Api;
+use api::{Api, ApiError::{self, *}, FriendsError};
 
 use dropfile::*;
 
-use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic};
-use api::ApiError::*;
 use libc::{signal, SIGINT, SIGTERM};
-
-use crate::api::{ApiError, FriendsError};
+use std::{env::{self, Args}, process::Command, io::{stdin, stdout, Write}, panic};
+use tungstenite;
 
 fn cont(api: &mut Api) -> Result<(), &'static str> {
-	let x: serde_json::Value = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
-	println!("{:?}", x);
-	return Ok(());
+	let friends: serde_json::Value = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
+	println!("{:?}", friends);
+	let (mut ws, _) = tungstenite::connect(
+		format!("wss://connect.ol.epicgames.com/?auth-token={}", api.token_response().eg1())
+	).map_err(|_| "failed to connect websocket")?;
+	loop {
+		let msg = ws.read_message().expect("read_message");
+		println!("{msg}");
+	}
 }
 
 fn login(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
-	let file = DropFile::open(&(path), true)?;
+	let file = DropFile::open(path, true)?;
 
 	if Command::new("xdg-open").arg(api::LOGIN).spawn().is_err() {
 		println!("{}", api::LOGIN);
@@ -40,7 +44,7 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 	};
 	println!("proceeding!");
 
-	let mut api = api::Api::new(auth.trim()).map_err(|err| match err {
+	let mut api = api::Api::new(auth.trim(), file).map_err(|err| match err {
 		Eg(eg) if eg.code == "errors.com.epicgames.common.oauth.invalid_client" => {
 			return "invalid client - open an issue";
 		}
@@ -53,36 +57,31 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 		}
 	})?;
 
-	let result = if args.next().as_deref() == Some("run") {
+	return if args.next().as_deref() == Some("run") {
 		cont(&mut(api))
 	} else {
 		Ok(())
 	};
-	api.exp(file).map_err(|_| "failed to write file")?;
-	return result;
 }
 
 fn run(mut args: Args) -> Result<(), &'static str> {
 	let path =
 		args.next().ok_or("account path required")?;
-	let mut file = DropFile::open(&(path), false)?;
-	let mut api = api::Api::resume(&mut(file)).map_err(|err| match err {
+	let file = DropFile::open(path, false)?;
+	let mut api = api::Api::resume(file).map_err(|err| match err {
 		_ => "session resume error",
 	})?;
 
 	println!("successfully resumed");
-
-	let result = cont(&mut(api));
-	api.exp(file).map_err(|_| "failed to write file")?;
-	return result;
+	return cont(&mut(api));
 }
 
 fn main() -> Result<(), &'static str> {
+	fn term() -> ! {
+		panic::resume_unwind(Box::new(()));
+	}
+	let term = term as *const () as usize;
 	unsafe {
-		fn term() -> ! {
-			panic::resume_unwind(Box::new(()));
-		}
-		let term = term as *const () as usize;
 		signal(SIGINT, term);
 		signal(SIGTERM, term);
 	}
