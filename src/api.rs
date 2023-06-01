@@ -285,11 +285,13 @@ impl Api {
 		let tkn_resp: TokenResponse = decode(exch)?;
 		let eg1 = eg1(&(tkn_resp));
 
-		return Ok(Self {
+		let mut s = Self {
 			cl, tkn_resp,
 			eg1_cache: eg1,
 			file,
-		});
+		};
+		s.exp().map_err(|err| In(err))?;
+		return Ok(s);
 	}
 	pub fn resume(mut file: DropFile) -> Result<Self, ApiError<TokenError>> {
 		let cl = reqwest_cl()?;

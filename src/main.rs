@@ -25,9 +25,7 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 		return serde_json::de::from_slice(slice(&(msg))).unwrap();
 	}
 
-	ws.write_message(Message::Text(
-		format!("SUBSCRIBE\n")
-	)).unwrap();
+	ws.write_message(Message::Text("SUBSCRIBE\n".to_owned())).unwrap();
 	let Ok(Message::Binary(msg)) = ws.read_message() else {
 		panic!();
 	};
