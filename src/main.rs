@@ -9,15 +9,38 @@ use libc::{signal, SIGINT, SIGTERM};
 use std::{env::{self, Args}, process::Command, io::{stdout, stdin, ErrorKind::WouldBlock, Write}, panic, time::Duration};
 use tungstenite::{error::Error::Io, Message, stream::MaybeTlsStream::NativeTls};
 
+use crate::api::go_online;
+
 fn cont(api: &mut Api) -> Result<(), &'static str> {
 	let friends: Friends = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
 	println!("{}-----------", friends);
 	let (mut ws, _) = tungstenite::connect(
 		format!("wss://connect.ol.epicgames.com/?auth-token={}", api.token_response().access_token)
 	).map_err(|_| "failed to connect websocket")?;
+
+	fn slice(msg: &[u8]) -> &[u8] {
+		return &(msg[msg.windows(2).position(|sl| sl == b"\n\n").unwrap() + 2..msg.len() - 1]);
+	}
+	fn json<T: serde::de::DeserializeOwned>(msg: Vec<u8>) -> T {
+		return serde_json::de::from_slice(slice(&(msg))).unwrap();
+	}
+
 	ws.write_message(Message::Text(
-		"SUBSCRIBE\n".to_owned()
+		format!("SUBSCRIBE\n")
 	)).unwrap();
+	let Ok(Message::Binary(msg)) = ws.read_message() else {
+		panic!();
+	};
+
+	#[derive(serde::Deserialize)]
+	struct Msg {
+		#[serde(rename = "connectionId")]
+		connection_id: String,
+	}
+	let connection_id = json::<Msg>(msg).connection_id;
+	let success: serde_json::Value = api.gql(go_online(&(connection_id))).map_err(|_: ApiError<FriendsError>| "gql")?;
+	println!("{}", success);
+
 	let NativeTls(stream) = ws.get_mut() else {
 		panic!();
 	};
@@ -27,7 +50,7 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 			Ok(Message::Binary(msg)) => {
 				let sl = &(msg[msg.windows(2).position(|sl| sl == b"\n\n").unwrap() + 2..msg.len() - 1]);
 				let json: serde_json::Value = serde_json::de::from_slice(sl).unwrap();
-				println!("{json}");
+				println!("{}", std::str::from_utf8(&(msg)).unwrap());
 			}
 			//Ok(_) => (),
 			Err(Io(e)) if e.kind() == WouldBlock => (),

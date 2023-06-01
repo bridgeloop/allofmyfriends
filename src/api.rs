@@ -29,8 +29,8 @@ pub const LOGIN: &'static str = formatcp!(
 ////////////////
 
 #[derive(Debug, serde::Serialize)]
-pub struct GqlOp {
-	query: &'static str,
+pub struct GqlOp<T: AsRef<str>> {
+	query: T,
 }
 macro_rules! GqlOp {
 	($str: expr) => {
@@ -38,7 +38,7 @@ macro_rules! GqlOp {
 	};
 }
 
-pub const FRIENDS_QUERY: GqlOp = GqlOp!(r#"query {
+pub const FRIENDS_QUERY: GqlOp<&'static str> = GqlOp!(r#"query {
 	Friends {
 		summary(displayNames: true) {
 			friends {
@@ -61,6 +61,17 @@ pub const FRIENDS_QUERY: GqlOp = GqlOp!(r#"query {
 		}
 	}
 }"#);
+pub fn go_online(connection_id: &str) -> GqlOp<String> {
+	return GqlOp {
+		query: format!(r#"mutation {{
+			PresenceV2 {{
+				updateStatus(namespace: "_", connectionId: "{}", status: "online") {{
+					success
+				}}
+			}}
+		}}"#, connection_id)
+	};
+}
 
 ////////////////
 
@@ -308,7 +319,7 @@ impl Api {
 		return self.eg1_cache.as_str();
 	}
 
-	pub fn gql<T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired>(&mut self, op: GqlOp) -> Result<T, ApiError<E>> {
+	pub fn gql<T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired, S: AsRef<str> + serde::Serialize>(&mut self, op: GqlOp<S>) -> Result<T, ApiError<E>> {
 		// to everyone reading this:
 		// did you know if your website has a user-agent whitelist, then you might [redacted]? [redacted] :-)
 		const UA: &'static str = "\
