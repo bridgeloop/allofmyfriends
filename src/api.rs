@@ -1,6 +1,6 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
 
-use std::fmt::{Display, Debug};
+use std::{fmt::{Display, Debug}, ops::Deref};
 
 use dropfile::DropFile;
 use reqwest::{blocking::{Client, ClientBuilder, Response, Body}, IntoUrl, header::{HeaderMap, HeaderValue}};
@@ -104,9 +104,8 @@ impl ApiTokenExpired for TokenError {
 	}
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug)]
 pub struct FriendsAccount {
-	#[serde(rename = "displayName")]
 	pub display_name: Option<String>,
 	pub id: String,
 }
@@ -115,7 +114,7 @@ impl Display for FriendsAccount {
     	return write!(f, "display name: {}\nid: {}\n", self.display_name.as_deref().unwrap_or("[none]"), self.id);
     }
 }
-#[derive(Debug)]
+
 pub struct Friends(Vec<FriendsAccount>);
 impl Display for Friends {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -125,31 +124,40 @@ impl Display for Friends {
     	return Ok(());
     }
 }
+impl Deref for Friends {
+	type Target = Vec<FriendsAccount>;
+
+	fn deref(&self) -> &Self::Target {
+		return &(self.0);
+	}
+}
 impl<'de> Deserialize<'de> for Friends {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		#[derive(Deserialize)]
-		struct FriendsAccounts {
-			account: [FriendsAccount; 1],
+		let mut value = serde_json::Value::deserialize(deserializer)?;
+		let friends = value["data"]["Friends"]["summary"]["friends"]
+			.as_array_mut()
+			.ok_or(
+				serde::de::Error::custom(
+					"data.Friends.summary.friends is not an array"
+				)
+			)?;
+		let mut vec = Vec::with_capacity(friends.len());
+		for accounts in friends {
+			let mut account = accounts["account"][0].take();
+			let display_name = match account["displayName"].take() {
+				serde_json::Value::String(s) => Some(s),
+				_ => None,
+			};
+			let serde_json::Value::String(id) = account["id"].take() else {
+				return Err(serde::de::Error::custom(
+					"no account id?"
+				));
+			};
+			vec.push(FriendsAccount {
+				display_name, id,
+			});
 		}
-		#[derive(Deserialize)]
-		struct FriendsFriends {
-			friends: Vec<FriendsAccounts>,
-		}
-		#[derive(Deserialize)]
-		struct FriendsSummary {
-			summary: FriendsFriends,
-		}
-		#[derive(Deserialize)]
-		struct FriendsData {
-			#[serde(rename = "Friends")]
-			friends: FriendsSummary,
-		}
-		#[derive(Deserialize)]
-		struct FriendsResponse {
-			data: FriendsData,
-		}
-		let resp = FriendsResponse::deserialize(deserializer).unwrap();
-		return Ok(Self(resp.data.friends.summary.friends.iter().map(|accounts| accounts.account[0].clone()).collect()));
+		return Ok(Self(vec));
 	}
 }
 
