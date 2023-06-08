@@ -1,6 +1,6 @@
 use {serde::{self, de::DeserializeOwned}, serde_json};
 
-use std::{fmt::{Display, Debug}, ops::Deref};
+use std::{fmt::{Display, Debug}};
 
 use dropfile::DropFile;
 use reqwest::{blocking::{Client, ClientBuilder, Response, Body}, IntoUrl, header::{HeaderMap, HeaderValue}};
@@ -90,7 +90,7 @@ pub struct TokenResponse {
 	refresh_expires_at: String,
 
 	#[serde(rename = "displayName")]
-	display_name: String,
+	pub display_name: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -115,22 +115,7 @@ impl Display for FriendsAccount {
     }
 }
 
-pub struct Friends(Vec<FriendsAccount>);
-impl Display for Friends {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    	for friend in self.0.iter() {
-    		std::fmt::Display::fmt(&(friend), f)?;
-    	}
-    	return Ok(());
-    }
-}
-impl Deref for Friends {
-	type Target = Vec<FriendsAccount>;
-
-	fn deref(&self) -> &Self::Target {
-		return &(self.0);
-	}
-}
+pub struct Friends(pub Vec<FriendsAccount>);
 impl<'de> Deserialize<'de> for Friends {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		let mut value = serde_json::Value::deserialize(deserializer)?;
@@ -162,15 +147,15 @@ impl<'de> Deserialize<'de> for Friends {
 }
 
 #[derive(Debug)]
-pub struct FriendsError {
+pub struct GqlError {
 	pub code: String,
 }
-impl ApiTokenExpired for FriendsError {
+impl ApiTokenExpired for GqlError {
 	fn token_expired(&self) -> bool {
 		return self.code == "errors.com.epicgames.common.authentication.token_verification_failed";
 	}
 }
-impl<'de> Deserialize<'de> for FriendsError {
+impl<'de> Deserialize<'de> for GqlError {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		#[derive(Deserialize)]
 		struct InnerStruct {
@@ -329,7 +314,7 @@ impl Api {
 		return self.eg1_cache.as_str();
 	}
 
-	pub fn gql<T: DeserializeOwned, E: DeserializeOwned + ApiTokenExpired, S: AsRef<str> + serde::Serialize>(&mut self, op: GqlOp<S>) -> Result<T, ApiError<E>> {
+	pub fn gql<T: DeserializeOwned, S: AsRef<str> + serde::Serialize>(&mut self, op: GqlOp<S>) -> Result<T, ApiError<GqlError>> {
 		// to everyone reading this:
 		// did you know if your website has a user-agent whitelist, then you might [redacted]? [redacted] :-)
 		const UA: &'static str = "\

@@ -1,19 +1,35 @@
 // aiden@cmp.bz
 
 mod api;
-use api::{Api, ApiError::{self, *}, Friends, FriendsError};
+use api::{Api, ApiError::*, Friends};
 
 use dropfile::*;
 
 use libc::{signal, SIGINT, SIGTERM};
-use std::{env::{self, Args}, process::Command, io::{stdout, stdin, ErrorKind::WouldBlock, Write}, panic, time::Duration};
+use std::{env::{self, Args}, process::Command, io::{stdout, stdin, ErrorKind::WouldBlock, Write}, panic, time::Duration, collections::BTreeMap};
+use serde_json::Value;
 use tungstenite::{error::Error::Io, Message, stream::MaybeTlsStream::NativeTls};
 
 use crate::api::go_online;
 
 fn cont(api: &mut Api) -> Result<(), &'static str> {
-	let friends: Friends = api.gql(api::FRIENDS_QUERY).map_err(|_: ApiError<FriendsError>| "gql")?;
-	println!("{}-----------", friends);
+	println!("logged in as {}", api.token_response().display_name);
+
+	let display_names: BTreeMap<String, String> = {
+		let friends = match api.gql::<Friends, _>(api::FRIENDS_QUERY) {
+			Ok(f) => f,
+			Err(Eg(f)) if f.code == "errors.com.epicgames.common.authentication.token_verification_failed" => {
+				return Err("refresh token expired");
+			}
+			Err(_) => return Err("gql"),
+		};
+		let friends = friends.0.into_iter().map(|f| {
+			let display_name = f.display_name.unwrap_or_else(|| format!("[id:{}]", f.id));
+			return (f.id, display_name);
+		});
+
+		friends.collect()
+	};
 	let (mut ws, _) = tungstenite::connect(
 		format!("wss://connect.ol.epicgames.com/?auth-token={}", api.token_response().access_token)
 	).map_err(|_| "failed to connect websocket")?;
@@ -21,40 +37,57 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 	fn slice(msg: &[u8]) -> &[u8] {
 		return &(msg[msg.windows(2).position(|sl| sl == b"\n\n").unwrap() + 2..msg.len() - 1]);
 	}
-	fn json<T: serde::de::DeserializeOwned>(msg: Vec<u8>) -> T {
+	fn json(msg: Vec<u8>) -> Value {
 		return serde_json::de::from_slice(slice(&(msg))).unwrap();
 	}
 
 	ws.write_message(Message::Text("SUBSCRIBE\n".to_owned())).unwrap();
 	let Ok(Message::Binary(msg)) = ws.read_message() else {
-		panic!();
+		return Err("failed to read from ws");
 	};
-
-	#[derive(serde::Deserialize)]
-	struct Msg {
-		#[serde(rename = "connectionId")]
-		connection_id: String,
+	
+	let Value::String(connection_id) = json(msg)["connectionId"].take() else {
+		return Err("failed to get connection id");
+	};
+	let status = match api.gql::<Value, _>(go_online(&(connection_id))) {
+		Ok(f) => f,
+		Err(Eg(f)) if f.code == "errors.com.epicgames.common.authentication.token_verification_failed" => {
+			return Err("refresh token expired");
+		}
+		Err(_) => return Err("gql"),
+	};
+	if !status["data"]["PresenceV2"]["updateStatus"]["success"].as_bool().unwrap_or(false) {
+		return Err("failed to set status to online");
 	}
-	let connection_id = json::<Msg>(msg).connection_id;
-	let success: serde_json::Value = api.gql(go_online(&(connection_id))).map_err(|_: ApiError<FriendsError>| "gql")?;
-	println!("{}", success);
 
 	let NativeTls(stream) = ws.get_mut() else {
-		panic!();
+		panic!("why the FUCK is it not a tls stream");
 	};
 	stream.get_mut().set_read_timeout(Some(Duration::from_secs(40))).unwrap();
+
 	loop {
 		match ws.read_message() {
-			Ok(Message::Binary(msg)) => {
-				let sl = &(msg[msg.windows(2).position(|sl| sl == b"\n\n").unwrap() + 2..msg.len() - 1]);
-				let json: serde_json::Value = serde_json::de::from_slice(sl).unwrap();
-				println!("{}", std::str::from_utf8(&(msg)).unwrap());
+			Ok(Message::Binary(msg)) => 'x: {
+				let msg = json(msg);
+				if msg["type"].as_str() != Some("presence.v1.UPDATE") {
+					break 'x;
+				}
+				let payload = msg["payload"].as_object().expect("presence update must have payload");
+				let id = payload["accountId"].as_str().expect("payload.accountId must be a string");
+				let status = payload["status"].as_str().expect("payload.status must be a string");
+				match status {
+					"online" | "offline" =>
+						println!("{} went {}", display_names.get(id).expect("to-do: update display_names"), status),
+					_ => (),
+				};
+				break 'x;
 			}
-			//Ok(_) => (),
-			Err(Io(e)) if e.kind() == WouldBlock => (),
-			_ => panic!(),
+			Ok(_) => panic!(),
+
+			Err(Io(e)) if e.kind() == WouldBlock => (), // read timeout
+			Err(_) => return Err("failed to read from ws"),
 		};
-		ws.write_message(Message::Pong(vec![])).unwrap();
+		ws.write_message(Message::Pong(vec![])).map_err(|_| "failed to write to ws")?;
 	}
 }
 
@@ -90,7 +123,7 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 		}
 		other => {
 			eprintln!("{other:?}");
-			return "unknown error"
+			return "unknown error";
 		}
 	})?;
 
