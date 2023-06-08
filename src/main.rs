@@ -10,19 +10,18 @@ use std::{env::{self, Args}, process::Command, io::{stdout, stdin, ErrorKind::Wo
 use serde_json::Value;
 use tungstenite::{error::Error::Io, Message, stream::MaybeTlsStream::NativeTls};
 
-use crate::api::go_online;
+use crate::api::{go_online, ApiError, GqlError};
 
 fn cont(api: &mut Api) -> Result<(), &'static str> {
 	println!("logged in as {}", api.token_response().display_name);
-
-	let display_names: BTreeMap<String, String> = {
-		let friends = match api.gql::<Friends, _>(api::FRIENDS_QUERY) {
-			Ok(f) => f,
-			Err(Eg(f)) if f.code == "errors.com.epicgames.common.authentication.token_verification_failed" => {
-				return Err("refresh token expired");
-			}
-			Err(_) => return Err("gql"),
+	fn e(err: ApiError<GqlError>) -> &'static str {
+		return match err {
+			Eg(f) if f.code == "errors.com.epicgames.common.authentication.token_verification_failed" => "refresh token expired",
+			_ => "gql",
 		};
+	}
+	let display_names: BTreeMap<String, String> = {
+		let friends = api.gql::<Friends, _>(api::FRIENDS_QUERY).map_err(e)?;
 		let friends = friends.0.into_iter().map(|f| {
 			let display_name = f.display_name.unwrap_or_else(|| format!("[id:{}]", f.id));
 			return (f.id, display_name);
@@ -49,13 +48,7 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 	let Value::String(connection_id) = json(msg)["connectionId"].take() else {
 		return Err("failed to get connection id");
 	};
-	let status = match api.gql::<Value, _>(go_online(&(connection_id))) {
-		Ok(f) => f,
-		Err(Eg(f)) if f.code == "errors.com.epicgames.common.authentication.token_verification_failed" => {
-			return Err("refresh token expired");
-		}
-		Err(_) => return Err("gql"),
-	};
+	let status = api.gql::<Value, _>(go_online(&(connection_id))).map_err(e)?;
 	if !status["data"]["PresenceV2"]["updateStatus"]["success"].as_bool().unwrap_or(false) {
 		return Err("failed to set status to online");
 	}
