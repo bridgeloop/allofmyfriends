@@ -12,7 +12,8 @@ use tungstenite::{error::Error::Io, Message, stream::MaybeTlsStream::NativeTls};
 
 use crate::api::{go_online, ApiError, GqlError};
 
-fn cont(api: &mut Api) -> Result<(), &'static str> {
+// no real success condition here; should run forever
+fn cont(api: &mut Api) -> Result<&'static str, &'static str> {
 	println!("logged in as {}", api.token_response().display_name);
 	fn e(err: ApiError<GqlError>) -> &'static str {
 		return match err {
@@ -58,6 +59,7 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 	};
 	stream.get_mut().set_read_timeout(Some(Duration::from_secs(40))).unwrap();
 
+	// return Ok on error after here, i guess?
 	loop {
 		match ws.read_message() {
 			Ok(Message::Binary(msg)) => 'x: {
@@ -68,20 +70,33 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 				let payload = msg["payload"].as_object().expect("presence update must have payload");
 				let id = payload["accountId"].as_str().expect("payload.accountId must be a string");
 				let status = payload["status"].as_str().expect("payload.status must be a string");
+				let display_name = display_names.get(id).expect("to-do: update display_names");
+				#[cfg(debug_assertions)]
+				let display_name = 
+					format!("{}[id:{}]", display_name, id);
 				match status {
 					"online" | "offline" =>
-						println!("{} went {}", display_names.get(id).expect("to-do: update display_names"), status),
+						println!("{} is {}", display_name, status),
 					_ => (),
 				};
+				#[cfg(debug_assertions)]
+				println!("{msg:?}");
 				break 'x;
 			}
-			Ok(_) => panic!(),
+			Ok(_) => return Ok("unknown message type"),
 
 			Err(Io(e)) if e.kind() == WouldBlock => (), // read timeout
-			Err(_) => return Err("failed to read from ws"),
+			Err(_) => return Ok("failed to read from ws"),
 		};
-		ws.write_message(Message::Pong(vec![])).map_err(|_| "failed to write to ws")?;
+		if let Err(_) = ws.write_message(Message::Pong(vec![])) {
+			return Ok("failed to write to ws");
+		}
 	}
+}
+fn cont_print(api: &mut Api) -> Result<(), &'static str> {
+	let stop_reason = cont(api)?;
+	println!("stopped because: {stop_reason}");
+	return Ok(());
 }
 
 fn login(path: &str, run: bool) -> Result<(), &'static str> {
@@ -103,7 +118,6 @@ fn login(path: &str, run: bool) -> Result<(), &'static str> {
 			break ln;
 		}
 	};
-	println!("proceeding!");
 
 	let mut api = api::Api::new(auth.trim(), file).map_err(|err| match err {
 		Eg(eg) if eg.code == "errors.com.epicgames.common.oauth.invalid_client" => {
@@ -118,11 +132,10 @@ fn login(path: &str, run: bool) -> Result<(), &'static str> {
 		}
 	})?;
 
-	return if run {
-		cont(&mut(api))
-	} else {
-		Ok(())
-	};
+	if run {
+		return cont_print(&mut(api));
+	}
+	return Ok(());
 }
 
 fn run(path: &str) -> Result<(), &'static str> {
@@ -130,9 +143,7 @@ fn run(path: &str) -> Result<(), &'static str> {
 	let mut api = api::Api::resume(file).map_err(|err| match err {
 		_ => "session resume error",
 	})?;
-
-	println!("successfully resumed");
-	return cont(&mut(api));
+	return cont_print(&mut(api));
 }
 
 fn main() -> Result<(), &'static str> {
