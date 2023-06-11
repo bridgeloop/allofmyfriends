@@ -6,7 +6,7 @@ use api::{Api, ApiError::*, Friends};
 use dropfile::*;
 
 use libc::{signal, SIGINT, SIGTERM};
-use std::{env::{self, Args}, process::Command, io::{stdout, stdin, ErrorKind::WouldBlock, Write}, panic, time::Duration, collections::BTreeMap};
+use std::{env::args as Args, process::Command, io::{stdout, stdin, ErrorKind::WouldBlock, Write}, panic, time::Duration, collections::BTreeMap};
 use serde_json::Value;
 use tungstenite::{error::Error::Io, Message, stream::MaybeTlsStream::NativeTls};
 
@@ -84,9 +84,7 @@ fn cont(api: &mut Api) -> Result<(), &'static str> {
 	}
 }
 
-fn login(mut args: Args) -> Result<(), &'static str> {
-	let path =
-		args.next().ok_or("account path required")?;
+fn login(path: &str, run: bool) -> Result<(), &'static str> {
 	let file = DropFile::open(path, true)?;
 
 	if Command::new("xdg-open").arg(api::LOGIN).spawn().is_err() {
@@ -120,16 +118,14 @@ fn login(mut args: Args) -> Result<(), &'static str> {
 		}
 	})?;
 
-	return if args.next().as_deref() == Some("run") {
+	return if run {
 		cont(&mut(api))
 	} else {
 		Ok(())
 	};
 }
 
-fn run(mut args: Args) -> Result<(), &'static str> {
-	let path =
-		args.next().ok_or("account path required")?;
+fn run(path: &str) -> Result<(), &'static str> {
 	let file = DropFile::open(path, false)?;
 	let mut api = api::Api::resume(file).map_err(|err| match err {
 		_ => "session resume error",
@@ -149,14 +145,34 @@ fn main() -> Result<(), &'static str> {
 		signal(SIGTERM, term);
 	}
 
-	let mut args = env::args();
+	let mut args = Args();
 	let action = args.nth(1);
 	return match action.as_deref() {
-		Some("login") => login(args),
-		Some("run") => run(args),
+		Some("login") => {
+			let path = args.next().ok_or("account path required")?;
+			let run = args.next().as_deref() == Some("run");
+			login(path.as_str(), run)
+		}
+		Some("run") => run(args.next().ok_or("account path required")?.as_str()),
+		Some(path) if 'guess: {
+			eprintln!("no action provided, trying `run`");
+			let Err(err) = run(path) else {
+				break 'guess true;
+			};
+			eprintln!("`run` failed: {err}");
+
+			eprintln!("trying `login`");
+			let run = args.next().as_deref() == Some("run");
+			let Err(err) = login(path, run) else {
+				break 'guess true;
+			};
+			eprintln!("`login` failed: {err}");
+			
+			break 'guess false;
+		} => Ok(()),
 		_ => {
 			eprintln!("valid actions: login, run");
-			return Err("invalid action");
+			Err("invalid action")
 		}
 	};
 }
